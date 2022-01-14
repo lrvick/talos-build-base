@@ -1,36 +1,46 @@
-NAME := talos
-REGISTRY := docker.io/
-NAMESPACE := $(REGISTRY)$(NAME)
-TARGET := x86_64
-VERSION := "develop"
-RELEASE_DIR := release/$(VERSION)
-DOCKER_BUILDKIT := 1
-OUT_DIR := build/
-BUILD_ARGS = $(shell cat config.env | sed 's@^@--build-arg @g' | paste -s -d " ")
-.DEFAULT_GOAL := all
+REGISTRY ?= ghcr.io
+USERNAME ?= talos-systems
+TAG ?= $(shell git describe --tag --always --dirty)
+REGISTRY_AND_USERNAME := $(REGISTRY)/$(USERNAME)
+RUN_TESTS ?=
+
+BUILD_PLATFORM ?= linux/amd64
+PLATFORM ?= linux/amd64,linux/arm64
+PROGRESS ?= auto
+PUSH ?= false
+
+BUILD := docker buildx build
+COMMON_ARGS := --progress=$(PROGRESS)
+COMMON_ARGS += --platform=$(PLATFORM)
+COMMON_ARGS += --build-arg=VERSION=$(TAG)
+COMMON_ARGS += --build-arg=USERNAME=$(USERNAME)
+COMMON_ARGS += --build-arg=REGISTRY=$(REGISTRY)
+COMMON_ARGS += $(shell cat config.env | sed 's@^@--build-arg @g' | paste -s -d " ")
 
 include config.env
 export
 
+PKGS := build base
+
+all: $(PKGS)
+
+.DEFAULT_GOAL := all
+
 .PHONY: all
 all: images/go.tar
 
-images/base.tar: images/base
-	docker build \
-		--tag $(NAMESPACE)/base \
-		$(BUILD_ARGS) \
-		$<
-	docker save $(NAMESPACE)/base -o images/base.tar
+.PHONY: build
+build:
+	$(BUILD) $(COMMON_ARGS) \
+		--target=$@ \
+		.
 
-images/go.tar: images/go images/base.tar
-	docker load -i images/base.tar
-	docker build \
-		--tag $(NAMESPACE)/go \
-		--build-arg FROM=$(NAMESPACE)/base \
-		$(BUILD_ARGS) \
-		$<
-	docker save $(NAMESPACE)/go -o images/go.tar
-
+.PHONY: base
+base:
+	$(BUILD) $(COMMON_ARGS) \
+		--target=$@ \
+		--tag $(REGISTRY_AND_USERNAME)/$@:$(TAG)-$@ \
+		.
 
 .PHONY: clean
 clean:
@@ -43,22 +53,41 @@ mrproper:
 
 .PHONY: update-packages
 update-packages:
-	docker rm -f "$(NAME)-update-packages" || :
+	docker rm -f "$(USERNAME)-update-packages" || :
 	docker run \
 		--rm \
 		--detach \
-		--name "$(NAME)-update-packages" \
-		--volume $(PWD)/images/base/files/etc/apt/packages-base.list:/etc/apt/packages-base.list \
-		--volume $(PWD)/images/base/files/usr/local/bin:/usr/local/bin \
-		debian@sha256:$(DEBIAN_IMAGE_HASH) tail -f /dev/null
-	docker exec -it "$(NAME)-update-packages" update-packages
+		--platform=linux/arm64 \
+		--name "$(USERNAME)-update-packages-aarch64" \
+		--volume $(PWD)/files/etc/apt/packages-base.list:/etc/apt/packages-base.list \
+		--volume $(PWD)/files/usr/local/bin:/usr/local/bin \
+		debian tail -f /dev/null
+		#debian@sha256:$(DEBIAN_IMAGE_HASH) tail -f /dev/null
+	docker run \
+		--rm \
+		--detach \
+		--platform=linux/x86_64 \
+		--name "$(USERNAME)-update-packages-x86_64" \
+		--volume $(PWD)/files/etc/apt/packages-base.list:/etc/apt/packages-base.list \
+		--volume $(PWD)/files/usr/local/bin:/usr/local/bin \
+		debian tail -f /dev/null
+		#debian@sha256:$(DEBIAN_IMAGE_HASH) tail -f /dev/null
+	docker exec -it "$(USERNAME)-update-packages-x86_64" update-packages
+	docker exec -it "$(USERNAME)-update-packages-aarch64" update-packages
 	docker cp \
-		"$(NAME)-update-packages:/etc/apt/packages.list" \
-		"$(PWD)/images/base/files/etc/apt/packages.list"
+		"$(USERNAME)-update-packages-x86_64:/etc/apt/packages.list" \
+		"$(PWD)/files/etc/apt/packages-x86_64.list"
 	docker cp \
-		"$(NAME)-update-packages:/etc/apt/sources.list" \
-		"$(PWD)/images/base/files/etc/apt/sources.list"
+		"$(USERNAME)-update-packages-aarch64:/etc/apt/packages.list" \
+		"$(PWD)/files/etc/apt/packages-aarch64.list"
 	docker cp \
-		"$(NAME)-update-packages:/etc/apt/package-hashes.txt" \
-		"$(PWD)/images/base/files/etc/apt/package-hashes.txt"
-	docker rm -f "$(NAME)-update-packages"
+		"$(USERNAME)-update-packages-x86_64:/etc/apt/package-hashes.txt" \
+		"$(PWD)/files/etc/apt/package-hashes-x86_64.txt"
+	docker cp \
+		"$(USERNAME)-update-packages-aarch64:/etc/apt/package-hashes.txt" \
+		"$(PWD)/files/etc/apt/package-hashes-aarch64.txt"
+	docker cp \
+		"$(USERNAME)-update-packages-x86_64:/etc/apt/sources.list" \
+		"$(PWD)/files/etc/apt/sources.list"
+	docker rm -f "$(USERNAME)-update-packages-x86_64"
+	docker rm -f "$(USERNAME)-update-packages-aarch64"
